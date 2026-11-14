@@ -1,0 +1,81 @@
+name: Build Thock Keyboard iOS (unsigned ipa)
+
+# 폰에서 쓰기 좋게: 저장소에 프로젝트 zip을 그대로 올리면 그 zip을 풀어서 빌드한다.
+# zip 이름·저장소 이름은 상관없다 (project.yml이 들어 있는 zip 중 이름순으로 마지막 것).
+# zip이 없으면 저장소에 풀어 올린 프로젝트를 그대로 빌드한다.
+on:
+  push:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find project (unzip uploaded zip if any)
+        run: |
+          Z=""
+          for f in *.zip; do
+            [ -f "$f" ] || continue
+            if unzip -l "$f" | grep -q "project.yml"; then Z="$f"; fi
+          done
+          if [ -n "$Z" ]; then
+            echo "uploaded zip: $Z"
+            rm -rf _src && mkdir _src && unzip -q "$Z" -d _src
+            P=$(find _src -maxdepth 3 -name project.yml | head -1)
+            test -n "$P" || { echo "project.yml not found in $Z"; exit 1; }
+            DIR=$(dirname "$P")
+          elif [ -f project.yml ]; then
+            DIR=.
+          else
+            echo "아직 프로젝트 zip이 없어요. zip을 올리면 다시 돌아가요."
+            echo "SKIP=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "project folder: $DIR"
+          echo "PROJ_DIR=$DIR" >> "$GITHUB_ENV"
+
+      - name: Install XcodeGen
+        if: env.SKIP != '1'
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        if: env.SKIP != '1'
+        working-directory: ${{ env.PROJ_DIR }}
+        run: xcodegen generate
+
+      - name: Build app + keyboard (unsigned)
+        if: env.SKIP != '1'
+        working-directory: ${{ env.PROJ_DIR }}
+        run: |
+          set -o pipefail
+          xcodebuild -version
+          xcodebuild -project ThockKeyboard.xcodeproj -target ThockApp \
+            -configuration Release -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            -quiet build
+
+      - name: Package ipa
+        if: env.SKIP != '1'
+        working-directory: ${{ env.PROJ_DIR }}
+        run: |
+          APP=build/Release-iphoneos/ThockApp.app
+          test -d "$APP/PlugIns/ThockKeyboard.appex" || { echo "keyboard extension missing"; exit 1; }
+          echo "sound files: $(ls "$APP/PlugIns/ThockKeyboard.appex/Sounds" | wc -l)"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry ThockKeyboard-unsigned.ipa Payload
+          ls -l ThockKeyboard-unsigned.ipa
+
+      - name: Upload ipa artifact
+        if: env.SKIP != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ThockKeyboard-ios-ipa
+          path: ${{ env.PROJ_DIR }}/ThockKeyboard-unsigned.ipa
+          if-no-files-found: error
